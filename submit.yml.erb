@@ -8,6 +8,14 @@
 batch_connect:
   template: basic
   websockify_cmd: '/usr/bin/websockify'
+  script_wrapper: |
+    # enable_modules
+    # module purge
+    touch /tmp/vnc_no_slurm
+    export PATH="/opt/TurboVNC/bin:$PATH"
+    export WEBSOCKIFY_CMD="/usr/bin/websockify"
+    %s
+
 script:
   native:
     singularity_bindpath: "/etc/slurm,/usr/bin/sbatch,/usr/bin/srun,/usr/bin/sacct,/usr/bin/scontrol,/usr/bin/salloc,/usr/bin/scancel,/usr/bin/squeue,/usr/lib64/slurm/,/usr/lib64/libmunge.so.2,/usr/lib64/libmunge.so.2.0.0,/usr/lib64/libpmi2.so,/usr/lib64/libpmi2.so.0,/usr/lib64/libpmi2.so.0.0.0,/usr/lib64/libpmi.so,/usr/lib64/libpmi.so.0,/usr/lib64/libpmi.so.0.0.0,/usr/lib64/libnvidia-ml.so.1,/run,/usr/local/pmix,/usr/local/hwloc,/usr/local/libevent,/usr/local/spack_v20d1,/usr/local/ucx/,/gpfs,/hpc,/kellogg,/projects,/software,/scratch"
@@ -16,14 +24,11 @@ script:
 batch_connect:
   template: basic
   websockify_cmd: '/usr/bin/websockify'
-  before_script: |
-    # Export the module function if it exists
-    [[ $(type -t module) == "function"  ]] && export -f module
   script_wrapper: |
     module purge
     module load singularityce/4.3.1-gcc-8.5.0
     <%- if virtual_env != "" %>
-    module load python-miniconda3/4.12.0
+    module load mamba/24.3.0
     source activate <%= virtual_env %>
     <%- else %>
     # This is to ensure that all "other modules" can be loaded (even
@@ -40,15 +45,101 @@ batch_connect:
     %s
     CTRSCRIPT
 
-    export container_image=<%= default_kernel %>
+    # Where is this container
+    export container_image=<%= rstudio_server_version %>
 
-    export SINGULARITY_BIND="/etc/slurm,/usr/bin/sbatch,/usr/bin/srun,/usr/bin/sacct,/usr/bin/scontrol,/usr/bin/salloc,/usr/bin/scancel,/usr/bin/squeue,/usr/lib64/slurm/,/usr/lib64/libmunge.so.2,/usr/lib64/libmunge.so.2.0.0,/usr/lib64/libpmi2.so,/usr/lib64/libpmi2.so.0,/usr/lib64/libpmi2.so.0.0.0,/usr/lib64/libpmi.so,/usr/lib64/libpmi.so.0,/usr/lib64/libpmi.so.0.0.0,/usr/lib64/libnvidia-ml.so.1,/run,/usr/local/pmix,/usr/local/hwloc,/usr/local/libevent,/usr/local/spack_v20d1,/usr/local/ucx/,/gpfs,/hpc,/kellogg,/projects,/software,/scratch"
+    # Set working directory to home directory
+
+    export SINGULARITYENV_RSTUDIO_SESSION_TIMEOUT=0
+    R_HOME=$(R RHOME)
+    R_VERSION=$(R --version | head -1 | awk '{print $3}')
+    R_EXEC=`which R --skip-alias`
+
+    # Need a unique /tmp for this job for /tmp/rstudio-rsession & /tmp/rstudio-server
+    RSTUDIO_SERVER_TMPDIR=$(mktemp -d /tmp/rserver.XXXXXX)
+    mkdir -m 700 -p ${RSTUDIO_SERVER_TMPDIR}/rstudio-server  
+    mkdir -p ${RSTUDIO_SERVER_TMPDIR}/var/run/{lock/rstudio-server,rstudio-server/rstudio-rsession,mount,systemd} ${RSTUDIO_SERVER_TMPDIR}/var/lib/rstudio-server ${RSTUDIO_SERVER_TMPDIR}/logs/{rstudio,rstudio-server}
+    uuidgen > ${RSTUDIO_SERVER_TMPDIR}/rstudio-server/secure-cookie-key
+    chmod 600 ${RSTUDIO_SERVER_TMPDIR}/rstudio-server/secure-cookie-key
+
+    # OnDemand Dir for RStudio Configs
+    export RSTUDIO_CONFIG=${PWD}
+
+    cat >${RSTUDIO_CONFIG}/rserver.conf <<END
+    # Server Configuration File
+    rsession-which-r=${R_EXEC}
+    auth-timeout-minutes=0
+    rsession-proxy-max-wait-secs=45
+    auth-stay-signed-in-days=10
+    session-use-file-storage=1
+    <%- if virtual_env != "" %>
+    rsession-ld-library-path=${CONDA_PREFIX}/lib
+    <%- else %>
+    <%- if (version == "R/4.0.0") or (version == "R/4.1.0") %>
+    rsession-ld-library-path=/usr/lib64/:${LD_LIBRARY_PATH}
+    <%- else %>
+    rsession-ld-library-path=${LD_LIBRARY_PATH}
+    <%- end %>
+    <%- end %>
+    END
+
+    cat > ${RSTUDIO_CONFIG}/rsession.conf <<END
+    session-timeout-minutes=0
+    session-save-action-default=no
+    END
+
+    # rsession needs to start with OMP_NUM_THREADS set to prevent OpenBLAS
+    # (and any other OpenMP-enhanced libraries used by R) from spawning too many
+    # threads. a wrapper script is created for rsession.
+    #
+    cat > ${RSTUDIO_CONFIG}/rsession.sh <<END
+    #!/bin/sh
+    set -o xtrace
+    R_DOC_DIR=$R_HOME/doc
+    R_INCLUDE_DIR=$R_HOME/include
+    R_SHARE_DIR=$R_HOME/share
+    RSTUDIO_DEFAULT_R_VERSION_HOME=$R_HOME
+    RSTUDIO_DEFAULT_R_VERSION=$R_VERSION
+    PATH=${PATH}:/usr/lib/rstudio-server/bin
+    export PKG_CONFIG_PATH=${PKG_CONFIG_PATH}
+    export OMP_NUM_THREADS=${SLURM_NPROCS}
+    export MC_CORES=$((${SLURM_NPROCS}-1))
+    export SLURM_NPROCS=${SLURM_NPROCS}
+    export SLURM_NTASKS=${SLURM_NTASKS}
+    export INCLUDE=${INCLUDE}
+    export C_INCLUDE_PATH=${C_INCLUDE_PATH}
+    export CPLUS_INCLUDE_PATH=${CPLUS_INCLUDE_PATH}
+    export UDUNITS2_INCLUDE="/hpc/software/spack_v20d1/spack/opt/spack/linux-rhel7-x86_64/gcc-4.8.5/udunits-2.2.24-35mdgjfwirb2evo7clknfa7ipibxmji5/include"
+    export UDUNITS2_LIBS="/hpc/software/spack_v20d1/spack/opt/spack/linux-rhel7-x86_64/gcc-4.8.5/udunits-2.2.24-35mdgjfwirb2evo7clknfa7ipibxmji5/lib"
+    /usr/lib/rstudio-server/bin/rsession "\${@}" 
+    END
+
+    chmod +x ${RSTUDIO_CONFIG}/rsession.sh
+
+    # [Rstudio 1.4] database is required
+    cat > ${RSTUDIO_CONFIG}/database.conf <<END
+    provider=sqlite
+    directory=/var/lib/rstudio-server
+    END
+
+    # [Rstudio 1.4] configure logging
+    cat > ${RSTUDIO_CONFIG}/logging.conf <<END
+    [*]
+    log-level=debug
+    max-size-mb=10
+    END
 
     <%- if gres_value != "" %>
     export SING_GPU="--nv"
     <%- else %>
     export SING_GPU=""
     <%- end %>
+
+    export SINGULARITY_BIND="/etc/slurm,/usr/bin/sbatch,/usr/bin/srun,/usr/bin/sacct,/usr/bin/scontrol,/usr/bin/salloc,/usr/bin/scancel,/usr/bin/squeue,/usr/lib64/slurm/,/usr/lib64/libmunge.so.2,/usr/lib64/libmunge.so.2.0.0,/usr/lib64/libpmi2.so,/usr/lib64/libpmi2.so.0,/usr/lib64/libpmi2.so.0.0.0,/usr/lib64/libpmi.so,/usr/lib64/libpmi.so.0,/usr/lib64/libpmi.so.0.0.0,/usr/lib64/libnvidia-ml.so.1,/run,/usr/local/pmix,/usr/local/hwloc,/usr/local/libevent,/usr/local/spack_v20d1,/usr/local/ucx/,/gpfs,/hpc,/kellogg,/projects,/software,/scratch"
+
+    export SINGULARITY_BIND="$SINGULARITY_BIND,${RSTUDIO_SERVER_TMPDIR}/logs/rstudio-server:/var/log/rstudio-server,${RSTUDIO_SERVER_TMPDIR}/logs/rstudio:/var/log/rstudio,${RSTUDIO_SERVER_TMPDIR}/var/run:/var/run,${RSTUDIO_SERVER_TMPDIR}/var/lib/rstudio-server:/var/lib/rstudio-server"
+
+    export SINGULARITY_BIND="$SINGULARITY_BIND,${RSTUDIO_CONFIG}/rsession.conf:/etc/rstudio/rsession.conf,${RSTUDIO_CONFIG}/rserver.conf:/etc/rstudio/rserver.conf,${RSTUDIO_CONFIG}/database.conf:/etc/rstudio/database.conf,${RSTUDIO_CONFIG}/rsession.sh:/etc/rstudio/rsession.sh,${RSTUDIO_CONFIG}/logging.conf:/etc/rstudio/logging.conf"
 
     singularity exec $SING_GPU "${container_image}" /bin/bash container.sh
 
