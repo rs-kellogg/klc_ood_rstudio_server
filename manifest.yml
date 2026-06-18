@@ -1,0 +1,12 @@
+---
+name: KLC RStudio Server
+icon: fa://server
+category: Kellogg Linux Cluster
+subcategory: Servers
+role: batch_connect
+description: |
+description: |
+  This app will launch [RStudio Server] on [KLC]. Please take special care to list any additional modules in the appropriate section of the form below that you need to install and run R packages.
+
+  [RStudio Server]: https://posit.co/products/open-source/rstudio-server/
+  [KLC]: https://www.kellogg.northwestern.edu/academics-research/research-support/computing/kellogg-linux-cluster/

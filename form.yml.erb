@@ -1,0 +1,198 @@
+# Batch Connect app configuration file
+#
+# @note Used to define the submitted cluster, title, description, and
+<%
+if File.exists?("#{Dir.home}/.conda/environments.txt")
+  fileObject = File.open("#{Dir.home}/.conda/environments.txt", "r")
+  virtual_environments = fileObject.read()
+  fileObject.close()
+else
+  virtual_environments = ""
+end
+%>
+---
+
+form:
+  - cluster
+  - bc_num_hours
+  - version
+  # What other modules need to be in your RStudio Server environment
+  - other_modules
+  # This checkbox will allow people to use a virtual environment with RStudio Server
+  - use_virtual_env
+  # Using R from an anaconda virtual environment
+  - virtual_env
+  # This allows a user to whether they want to start with a fresh session
+  # or one that tries to pull in information from a previous or perhaps on-going session 
+  - start_clean_session
+  - rstudio_server_version
+  # Quest Slurm fields (hidden when a KLC node is selected)
+  - slurm_partition
+  - gres_value
+  - slurm_account
+  - num_cores
+  - memory_per_node
+  - user_email
+  - job_name
+  # Hidden fields used by JavaScript to build partition/account dropdowns
+  - raw_data
+  - raw_group_data
+  - list_of_virtual_environments
+
+attributes:
+  cluster:
+    label: "Cluster"
+    widget: select
+    options:
+      - ["KLC Node 0202", "klc0202"]
+      - ["KLC Node 0203", "klc0203"]
+      - ["KLC Node 0301", "klc0301"]
+      - ["KLC Node 0302", "klc0302"]
+      - ["KLC Node 0303", "klc0303"]
+      - ["KLC Node 0304", "klc0304"]
+      - ["KLC Node 0305", "klc0305"]
+      - ["KLC Node 0306", "klc0306"]
+      - ["KLC Node 0307", "klc0307"]
+      - ["KLC Node 0401", "klc0401"]
+      - ["KLC Node 0402", "klc0402"]
+      - ["KLC Node 0503", "klc0503"]
+      - ["Kellogg Compute Nodes (Slurm)", "quests"]
+    value: "klc0307"
+    help: |
+      Select a KLC node to run directly on Kellogg Computing Center hardware, or
+      select Kellogg Compute Nodes (Slurm) to submit a Slurm job on Quest (additional
+      fields will appear).
+
+attributes:
+  version:
+    widget: select
+    label: "Quest installation of R to use in RStudio Server"
+    help: "This defines the version of R you want to run in RStudio Server."
+    display: true
+    options:
+      - [ "R-4.5.1", "R/4.5.1" ]
+      - [ "R-4.4.0", "R/4.4.0" ]
+      - [ "R-4.3.0", "R/4.3.0" ]
+      - [ "R-4.2.3", "R/4.2.3" ]
+      - [ "R-4.2.0", "R/4.2.0" ]
+      - [ "R-4.1.1", "R/4.1.1" ]
+      - [ "R-4.1.0", "R/4.1.0" ]
+      - [ "R-4.0.3", "R/4.0.3" ]
+      - [ "R-4.0.0", "R/4.0.0" ]
+
+  other_modules:
+    label: "List of other modules you want to load into your RStudio Server environment."
+    display: true
+    help: |
+      Please provide a space separated list of additional modules that you would like to be loaded into your environment. For example, if using R 4.4.0, we recommend including all of the following modules in your environment as these will enable you to install most R packages, `hdf5/1.14.1-2-gcc-12.3.0 gsl/2.7.1-gcc-12.3.0 fftw/3.3.10-gcc-12.3.0 gdal/3.7.0-gcc-12.3.0`
+    value: ""
+
+  start_clean_session:
+    widget: "check_box"
+    label: "Launch a Clean RSession: Will not attempt to load previous session data"
+    help: |
+      Check this box if you want to start clean rsession one that will not attempt to load previous session data.
+
+  use_virtual_env:
+    widget: "check_box"
+    label: "Select to use a virtual environment with RStudio Server"
+    help: |
+      This checkbox will allow you to use a R installed in a virtual environment with RStudio Server. Selecting this option will remove the ability to load Quest modules or use the Quest installations of R.
+
+  virtual_env:
+    label: "Choose the virtual environment that you want to use"
+    help: |
+    widget: select
+    help: |
+      The list of environments that you can choose from is taken from `$HOME/.conda/environments.txt`
+    default: ""
+
+  rstudio_server_version:
+    widget: select
+    label: "RStudio Server Version"
+    help: "Which version of RStudio Server do you want to use."
+    options:
+      - [ "2025.09.0", "/software/rhel8/quest_ondemand/quest_ood_rstudio_server/rstudio-2025.09.0-387.sif" ]
+
+  bc_num_hours:
+    label: "Wall Clock Time"
+    help: |
+      The maximum number of hours the session will run for. You can always terminate
+      your session early, but it will automatically be terminated once the walltime is hit.
+    value: 8
+
+  slurm_partition:
+    label: "SLURM Partition"
+    help: |
+      The SLURM partition you want to submit to. This selection will influence which
+      accounts you can choose as some partitions can only be submitted to through
+      certain accounts.
+    value: kellogg
+
+  slurm_account:
+    label: "SLURM Account/Project Name"
+    help: |
+      The SLURM account (i.e., the value of the -A or --account flag used when
+      submitting a SLURM job).
+    value: kellogg
+
+  gres_value:
+    label: "Type of GPU that you would like to request"
+    help: |
+      If you are submitting to `gengpu` the only option that you can select is `A100`.
+    widget: select
+    default: ""
+
+  num_cores:
+    widget: "number_field"
+    label: "Number of CPUs/cores/processors"
+    value: 1
+    help: |
+      Please note that you likely do not need to request more than a single CPU unless
+      you know that your application can be parallelized and also please note that the
+      more cores requested, the longer the wait for the session to start.
+    min: 1
+    max: 64
+    step: 1
+    id: "num_cores"
+
+  memory_per_node:
+    widget: "number_field"
+    label: "Total memory or RAM do you need in GB."
+    value: 5
+    help: |
+      How much total memory/RAM do you need in GB.
+    min: 1
+    max: 2048
+    step: 1
+    id: "memory_per_node"
+
+  user_email:
+    label: "Email Address (Optional)"
+    help: |
+      Enter your email address if you would like to receive an email when the session
+      starts. Leave blank for no email.
+
+  job_name:
+    label: "Job Name"
+    value: "KLC Jupyter Notebook"
+    help: |
+      The name of the Slurm job as it will appear in the queue.
+
+  raw_data:
+    label: "Account associations for use by JavaScript"
+    widget: hidden_field
+    value: "<%= RawSlurmData.read_sinfo_from_file %>"
+    cacheable: false
+
+  raw_group_data:
+    label: "linux groups for use by JavaScript"
+    widget: hidden_field
+    value: "<%= RawSlurmData.rawgroupdata %>"
+    cacheable: false
+
+  list_of_virtual_environments:
+    label: "List of user virtual environments for use by JavaScript"
+    widget: hidden_field
+    value: "<%= virtual_environments %>"
+    cacheable: false
