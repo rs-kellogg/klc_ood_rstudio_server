@@ -256,6 +256,10 @@ function set_cluster_change_handler() {
       toggle_gres_value_field_visibility(assocs);
       update_constraint_options(assocs);
       update_min_max(assocs);
+
+      // Set default cores and memory when switching to Kellogg Compute Nodes (Slurm)
+      $("#num_cores").val(1);
+      $("#memory_per_node").val(16);
     }
   });
 }
@@ -337,6 +341,10 @@ $(document).ready(function() {
     toggle_gres_value_field_visibility(assocs);
     update_constraint_options(assocs);
     update_min_max(assocs);
+
+    // Set default cores and memory on page load when Kellogg Compute Nodes (Slurm) is selected
+    $("#num_cores").val(1);
+    $("#memory_per_node").val(16);
   }
 
   set_available_virtual_env();
