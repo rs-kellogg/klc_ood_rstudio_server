@@ -24,7 +24,7 @@ function is_quest_cluster() {
 }
 
 function set_available_virtual_env() {
-  const virtual_env = $('#batch_connect_session_context_list_of_virtual_environments').val().split(" ");
+  const virtual_env = [''].concat($('#batch_connect_session_context_list_of_virtual_environments').val().split(" ").filter(x => x));
   replace_options($("#batch_connect_session_context_virtual_env"), virtual_env);
 }
 
@@ -94,7 +94,7 @@ function convert_gpu_partitions(GRES) {
                 }
             }
         }
-        gpu_options.push('');
+        gpu_options.unshift('');
     }
     return [...new Set(gpu_options)]
 }
