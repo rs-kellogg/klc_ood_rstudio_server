@@ -1,133 +1,282 @@
 <%
-  require 'fileutils'
-  FileUtils.mkdir_p(staged_root)
+require 'fileutils'
+require 'tmpdir'
+require 'securerandom'
 
-  is_klc    = !cluster.to_s.start_with?('quest')
-  ppn       = num_cores.blank? ? 1 : num_cores.to_i
-  walltime  = (bc_num_hours.to_i * 60)
+FileUtils.mkdir_p(staged_root)
 
-  # --- Singularity bind paths ---
-  base_bind_paths = %w[
-    /etc/slurm
-    /usr/bin/sbatch
-    /usr/bin/srun
-    /usr/bin/sacct
-    /usr/bin/scontrol
-    /usr/bin/salloc
-    /usr/bin/scancel
-    /usr/bin/squeue
-    /usr/lib64/slurm/
-    /usr/lib64/libmunge.so.2
-    /usr/lib64/libmunge.so.2.0.0
-    /usr/lib64/libpmi2.so
-    /usr/lib64/libpmi2.so.0
-    /usr/lib64/libpmi2.so.0.0.0
-    /usr/lib64/libpmi.so
-    /usr/lib64/libpmi.so.0
-    /usr/lib64/libpmi.so.0.0.0
-    /usr/lib64/libnvidia-ml.so.1
-    /run
-    /usr/local/pmix
-    /usr/local/hwloc
-    /usr/local/libevent
-    /usr/local/spack_v20d1
-    /usr/local/ucx/
-    /gpfs
-    /hpc
-    /kellogg
-    /projects
-    /software
-    /scratch
-  ]
+# -----------------------------
+# Build module load block
+# -----------------------------
+module_block = if virtual_env != ""
+  <<~MOD
+    module purge
+    module load mamba/24.3.0
+    source activate #{virtual_env}
+  MOD
+else
+  <<~MOD
+    module purge
+    module load git/2.37.2
+    module load #{version}
+    module load #{other_modules}
+    module load openssl/1.0.2k-gcc-4.8.5
+  MOD
+end
 
-  tmpdir_bind_paths = [
-    '${RSTUDIO_SERVER_TMPDIR}/logs/rstudio-server:/var/log/rstudio-server',
-    '${RSTUDIO_SERVER_TMPDIR}/logs/rstudio:/var/log/rstudio',
-    '${RSTUDIO_SERVER_TMPDIR}/var/run:/var/run',
-    '${RSTUDIO_SERVER_TMPDIR}/var/lib/rstudio-server:/var/lib/rstudio-server',
-  ]
+# -----------------------------
+# Capture environment ONCE
+# -----------------------------
+def capture_full_env(module_block)
+  script = <<~'BASH'
+    echo "__ENV_START__"
 
-  config_bind_paths = [
-    "#{staged_root}/rsession.conf:/etc/rstudio/rsession.conf",
-    "#{staged_root}/rserver.conf:/etc/rstudio/rserver.conf",
-    "#{staged_root}/database.conf:/etc/rstudio/database.conf",
-    "#{staged_root}/rsession.sh:/etc/rstudio/rsession.sh",
-    "#{staged_root}/logging.conf:/etc/rstudio/logging.conf",
-  ]
+    echo "R_EXEC=$(which R 2>/dev/null || true)"
+    echo "R_HOME=$(R RHOME 2>/dev/null || true)"
+    echo "R_VERSION=$(R --version 2>/dev/null | head -1 | cut -d' ' -f3)"
 
-  all_bind_paths   = base_bind_paths + tmpdir_bind_paths + config_bind_paths
-  singularity_bind = all_bind_paths.join(',')
 
-  sing_gpu = gres_value != "" ? "--nv" : ""
+    echo "PATH_VAR=$(printenv PATH 2>/dev/null || true)"
+    echo "LD_LIBRARY_PATH_VAR=$(printenv LD_LIBRARY_PATH 2>/dev/null || true)"
+    echo "CONDA_PREFIX_VAR=$(printenv CONDA_PREFIX 2>/dev/null || true)"
 
-  # --- rserver.conf ---
-  if virtual_env != ""
-    rsession_ld = 'rsession-ld-library-path=${CONDA_PREFIX}/lib'
-  elsif version == "R/4.0.0" || version == "R/4.1.0"
-    rsession_ld = 'rsession-ld-library-path=/usr/lib64/:${LD_LIBRARY_PATH}'
-  else
-    rsession_ld = 'rsession-ld-library-path=${LD_LIBRARY_PATH}'
+
+    echo "PKG_CONFIG_PATH_VAR=$(printenv PKG_CONFIG_PATH 2>/dev/null || true)"
+    echo "INCLUDE_VAR=$(printenv INCLUDE 2>/dev/null || true)"
+    echo "C_INCLUDE_PATH_VAR=$(printenv C_INCLUDE_PATH 2>/dev/null || true)"
+    echo "CPLUS_INCLUDE_PATH_VAR=$(printenv CPLUS_INCLUDE_PATH 2>/dev/null || true)"
+
+    echo "SLURM_NPROCS_VAR=$(printenv SLURM_NPROCS 2>/dev/null || true)"
+
+    echo "__ENV_END__"
+  BASH
+
+  full_cmd = <<~BASH
+    bash -lc '
+      #{module_block}
+      #{script}
+    '
+  BASH
+
+  raw = `#{full_cmd}`
+
+  env = {}
+  in_block = false
+
+  raw.each_line do |line|
+    line.strip!
+    next if line.empty?
+
+    if line == "__ENV_START__"
+      in_block = true
+      next
+    elsif line == "__ENV_END__"
+      break
+    end
+
+    next unless in_block
+
+    key, value = line.split("=", 2)
+    env[key] = value.to_s
   end
 
-  File.write("#{staged_root}/rserver.conf", <<~CONF)
-    # Server Configuration File
-    rsession-which-r=${R_EXEC}
-    auth-timeout-minutes=0
-    rsession-proxy-max-wait-secs=45
-    auth-stay-signed-in-days=10
-    session-use-file-storage=1
-    #{rsession_ld}
-  CONF
+  env
+end
 
-  File.write("#{staged_root}/rsession.conf", <<~CONF)
-    session-timeout-minutes=0
-    session-save-action-default=no
-  CONF
+env = capture_full_env(module_block)
 
-  # Note: using single-quote heredoc delimiter so $-variables are literal
-  File.write("#{staged_root}/rsession.sh", <<~'SH')
-    #!/bin/sh
-    set -o xtrace
-    R_DOC_DIR=$R_HOME/doc
-    R_INCLUDE_DIR=$R_HOME/include
-    R_SHARE_DIR=$R_HOME/share
-    RSTUDIO_DEFAULT_R_VERSION_HOME=$R_HOME
-    RSTUDIO_DEFAULT_R_VERSION=$R_VERSION
-    PATH=${PATH}:/usr/lib/rstudio-server/bin
-    export PKG_CONFIG_PATH=${PKG_CONFIG_PATH}
-    export OMP_NUM_THREADS=${SLURM_NPROCS}
-    export MC_CORES=$((${SLURM_NPROCS}-1))
-    export SLURM_NPROCS=${SLURM_NPROCS}
-    export SLURM_NTASKS=${SLURM_NTASKS}
-    export INCLUDE=${INCLUDE}
-    export C_INCLUDE_PATH=${C_INCLUDE_PATH}
-    export CPLUS_INCLUDE_PATH=${CPLUS_INCLUDE_PATH}
-    export UDUNITS2_INCLUDE="/hpc/software/spack_v20d1/spack/opt/spack/linux-rhel7-x86_64/gcc-4.8.5/udunits-2.2.24-35mdgjfwirb2evo7clknfa7ipibxmji5/include"
-    export UDUNITS2_LIBS="/hpc/software/spack_v20d1/spack/opt/spack/linux-rhel7-x86_64/gcc-4.8.5/udunits-2.2.24-35mdgjfwirb2evo7clknfa7ipibxmji5/lib"
-    /usr/lib/rstudio-server/bin/rsession "${@}"
-  SH
+r_exec          = env["R_EXEC"].to_s
+r_home          = env["R_HOME"].to_s
+r_version       = env["R_VERSION"].to_s
+ld_library_path = env["LD_LIBRARY_PATH_VAR"].to_s
+conda_prefix    = env["CONDA_PREFIX_VAR"].to_s
+path_env        = env["PATH_VAR"].to_s
+pkg_config_path     = env["PKG_CONFIG_PATH_VAR"].to_s
+include_path        = env["INCLUDE_VAR"].to_s
+c_include_path      = env["C_INCLUDE_PATH_VAR"].to_s
+cplus_include_path  = env["CPLUS_INCLUDE_PATH_VAR"].to_s
+slurm_nprocs_raw = env["SLURM_NPROCS_VAR"].to_s
 
-  File.write("#{staged_root}/database.conf", <<~CONF)
-    provider=sqlite
-    directory=/var/lib/rstudio-server
-  CONF
 
-  File.write("#{staged_root}/logging.conf", <<~CONF)
-    [*]
-    log-level=debug
-    max-size-mb=10
-  CONF
+# Fallbacks
+r_exec = "/usr/bin/R" if r_exec.empty?
+r_home = "/usr/lib64/R" if r_home.empty?
+r_version = "unknown" if r_version.empty?
 
-  # Make rsession.sh executable
-  File.chmod(0755, "#{staged_root}/rsession.sh")
+# -----------------------------
+# Create tempdir + structure
+# -----------------------------
+rstudio_tmpdir = Dir.mktmpdir("rserver.", staged_root)
+
+FileUtils.mkdir_p([
+  "#{rstudio_tmpdir}/rstudio-server",
+  "#{rstudio_tmpdir}/var/run/lock/rstudio-server",
+  "#{rstudio_tmpdir}/var/run/rstudio-server/rstudio-rsession",
+  "#{rstudio_tmpdir}/var/run/mount",
+  "#{rstudio_tmpdir}/var/run/systemd",
+  "#{rstudio_tmpdir}/var/lib/rstudio-server",
+  "#{rstudio_tmpdir}/logs/rstudio",
+  "#{rstudio_tmpdir}/logs/rstudio-server"
+])
+
+FileUtils.chmod(0700, rstudio_tmpdir)
+
+cookie_path = "#{rstudio_tmpdir}/rstudio-server/secure-cookie-key"
+File.write(cookie_path, SecureRandom.uuid)
+FileUtils.chmod(0600, cookie_path)
+
+# -----------------------------
+# Bind paths
+# -----------------------------
+base_bind_paths = %w[
+  /etc/slurm
+  /usr/bin/sbatch
+  /usr/bin/srun
+  /usr/bin/sacct
+  /usr/bin/scontrol
+  /usr/bin/salloc
+  /usr/bin/scancel
+  /usr/bin/squeue
+  /usr/lib64/slurm/
+  /usr/lib64/libmunge.so.2
+  /usr/lib64/libmunge.so.2.0.0
+  /usr/lib64/libpmi2.so
+  /usr/lib64/libpmi2.so.0
+  /usr/lib64/libpmi2.so.0.0.0
+  /usr/lib64/libpmi.so
+  /usr/lib64/libpmi.so.0
+  /usr/lib64/libpmi.so.0.0.0
+  /usr/lib64/libnvidia-ml.so.1
+  /run
+  /usr/local/pmix
+  /usr/local/hwloc
+  /usr/local/libevent
+  /usr/local/spack_v20d1
+  /usr/local/ucx/
+  /gpfs
+  /hpc
+  /kellogg
+  /projects
+  /software
+  /scratch
+]
+
+tmpdir_bind_paths = [
+  "#{rstudio_tmpdir}/logs/rstudio-server:/var/log/rstudio-server",
+  "#{rstudio_tmpdir}/logs/rstudio:/var/log/rstudio",
+  "#{rstudio_tmpdir}/var/run:/var/run",
+  "#{rstudio_tmpdir}/var/lib/rstudio-server:/var/lib/rstudio-server"
+]
+
+config_bind_paths = [
+  "#{staged_root}/rsession.conf:/etc/rstudio/rsession.conf",
+  "#{staged_root}/rserver.conf:/etc/rstudio/rserver.conf",
+  "#{staged_root}/database.conf:/etc/rstudio/database.conf",
+  "#{staged_root}/rsession.sh:/etc/rstudio/rsession.sh",
+  "#{staged_root}/logging.conf:/etc/rstudio/logging.conf"
+]
+
+all_bind_paths   = base_bind_paths + tmpdir_bind_paths + config_bind_paths
+singularity_bind = all_bind_paths.join(',')
+
+sing_gpu = gres_value != "" ? "--nv" : ""
+
+# -----------------------------
+# rserver.conf
+# -----------------------------
+rsession_ld =
+  if virtual_env != "" && !conda_prefix.empty?
+    "#{conda_prefix}/lib"
+  elsif version == "R/4.0.0" || version == "R/4.1.0"
+    "/usr/lib64/:#{ld_library_path}"
+  else
+    ld_library_path
+  end
+
+File.write("#{staged_root}/rserver.conf", <<~CONF)
+  rsession-which-r=#{r_exec}
+  auth-timeout-minutes=0
+  rsession-proxy-max-wait-secs=45
+  auth-stay-signed-in-days=10
+  session-use-file-storage=1
+  rsession-ld-library-path=#{rsession_ld}
+CONF
+
+# -----------------------------
+# rsession.conf
+# -----------------------------
+File.write("#{staged_root}/rsession.conf", <<~CONF)
+  session-timeout-minutes=0
+  session-save-action-default=no
+CONF
+
+slurm_nprocs =
+  if slurm_nprocs_raw.empty?
+    8
+  else
+    slurm_nprocs_raw.to_i
+  end
+
+slurm_nprocs = 8 if slurm_nprocs <= 0  # extra safety
+
+omp_num_threads = slurm_nprocs
+
+mc_cores = slurm_nprocs - 1
+mc_cores = 1 if mc_cores < 1
+
+# -----------------------------
+# rsession.sh
+# -----------------------------
+File.write("#{staged_root}/rsession.sh", <<~SH)
+  #!/bin/sh
+  set -o xtrace
+
+  R_DOC_DIR=#{r_home}/doc
+  R_INCLUDE_DIR=#{r_home}/include
+  R_SHARE_DIR=#{r_home}/share
+  RSTUDIO_DEFAULT_R_VERSION_HOME=#{r_home}
+  RSTUDIO_DEFAULT_R_VERSION=#{r_version}
+
+  export PKG_CONFIG_PATH=#{pkg_config_path}
+  export INCLUDE=#{include_path}
+  export C_INCLUDE_PATH=#{c_include_path}
+  export CPLUS_INCLUDE_PATH=#{cplus_include_path}
+
+  export UDUNITS2_INCLUDE="/hpc/software/spack_v20d1/spack/opt/spack/linux-rhel7-x86_64/gcc-4.8.5/udunits-2.2.24-35mdgjfwirb2evo7clknfa7ipibxmji5/include"
+  export UDUNITS2_LIBS="/hpc/software/spack_v20d1/spack/opt/spack/linux-rhel7-x86_64/gcc-4.8.5/udunits-2.2.24-35mdgjfwirb2evo7clknfa7ipibxmji5/lib"
+
+  export OMP_NUM_THREADS=#{omp_num_threads}
+  export MC_CORES=#{mc_cores}
+
+  PATH=#{path_env}:/usr/lib/rstudio-server/bin
+
+  /usr/lib/rstudio-server/bin/rsession "$@"
+SH
+
+File.chmod(0755, "#{staged_root}/rsession.sh")
+
+# -----------------------------
+# database & logging
+# -----------------------------
+File.write("#{staged_root}/database.conf", <<~CONF)
+  provider=sqlite
+  directory=/var/lib/rstudio-server
+CONF
+
+File.write("#{staged_root}/logging.conf", <<~CONF)
+  [*]
+  log-level=debug
+  max-size-mb=10
+CONF
 %>
+
 ---
-<% if is_klc %>
+<% if !cluster.to_s.start_with?('quest') %>
 batch_connect:
   template: basic
 script:
   native:
-    singularity_bindpath: "<%= all_bind_paths.join(',') %>"
+    singularity_bindpath: "<%= singularity_bind %>"
     singularity_container: <%= rstudio_server_version %>
 <% else %>
 batch_connect:
@@ -136,16 +285,6 @@ batch_connect:
   script_wrapper: |
     module purge
     module load singularityce/4.3.1-gcc-8.5.0
-    <%- if virtual_env != "" %>
-    module load mamba/24.3.0
-    source activate <%= virtual_env %>
-    <%- else %>
-    module load git/2.37.2
-    module load <%= version %>
-    module load <%= other_modules %>
-    module load <%= version %>
-    module load openssl/1.0.2k-gcc-4.8.5
-    <%- end %>
 
     cat << "CTRSCRIPT" > container.sh
     export PATH="$PATH:/opt/TurboVNC/bin"
@@ -154,19 +293,40 @@ batch_connect:
 
     export container_image=<%= rstudio_server_version %>
     export SINGULARITYENV_RSTUDIO_SESSION_TIMEOUT=0
-    R_HOME=$(R RHOME)
-    R_VERSION=$(R --version | head -1 | awk '{print $3}')
-    R_EXEC=`which R --skip-alias`
 
-    RSTUDIO_SERVER_TMPDIR=$(mktemp -d /tmp/rserver.XXXXXX)
-    mkdir -m 700 -p ${RSTUDIO_SERVER_TMPDIR}/rstudio-server
-    mkdir -p ${RSTUDIO_SERVER_TMPDIR}/var/run/{lock/rstudio-server,rstudio-server/rstudio-rsession,mount,systemd} \
-              ${RSTUDIO_SERVER_TMPDIR}/var/lib/rstudio-server \
-              ${RSTUDIO_SERVER_TMPDIR}/logs/{rstudio,rstudio-server}
-    uuidgen > ${RSTUDIO_SERVER_TMPDIR}/rstudio-server/secure-cookie-key
-    chmod 600 ${RSTUDIO_SERVER_TMPDIR}/rstudio-server/secure-cookie-key
+    singularity exec <%= sing_gpu %> \
+      --bind "<%= singularity_bind %>" \
+      "${container_image}" /bin/bash container.sh
 
-    export SINGULARITY_BIND="<%= singularity_bind %>"
+  header: |
+    #!/bin/bash
+        . ~/.bashrc
 
-    singularity exec <%= sing_gpu %> "${container_image}" /bin/bash container.sh
+script:
+  <%- if user_email != "" %>
+  email_on_started: true
+  <%- end %>
+  native:
+    - "--partition"
+    - "<%= slurm_partition %>"
+    - "--account"
+    - "<%= slurm_account %>"
+    - "--time"
+    - "<%= walltime %>"
+    - "--nodes"
+    - "1"
+    - "--ntasks-per-node"
+    - "<%= ppn %>"
+    - "--mem"
+    - "<%= memory_per_node %>G"
+    - "--job-name"
+    - "<%= job_name %>"
+    <%- if user_email != "" %>
+    - "--mail-user"
+    - "<%= user_email %>"
+    <%- end %>
+    <%- if gres_value != "" %>
+    - "--gres"
+    - "<%= gres_value %>"
+    <%- end %>
 <% end %>
