@@ -5,6 +5,15 @@ require 'securerandom'
 
 FileUtils.mkdir_p(staged_root)
 
+ppn       = num_cores.blank? ? 1 : num_cores.to_i
+walltime  = (bc_num_hours.to_i * 60)
+is_klc    = !cluster.to_s.start_with?('quest')
+
+if is_klc
+  omp_num_threads = 8
+  mc_cores = 7
+end
+
 # -----------------------------
 # Build module load block
 # -----------------------------
@@ -33,20 +42,16 @@ def capture_full_env(module_block)
 
     echo "R_EXEC=$(which R 2>/dev/null || true)"
     echo "R_HOME=$(R RHOME 2>/dev/null || true)"
-    echo "R_VERSION=$(R --version 2>/dev/null | head -1 | cut -d' ' -f3)"
-
+    echo "R_VERSION=4.5.1"
 
     echo "PATH_VAR=$(printenv PATH 2>/dev/null || true)"
     echo "LD_LIBRARY_PATH_VAR=$(printenv LD_LIBRARY_PATH 2>/dev/null || true)"
     echo "CONDA_PREFIX_VAR=$(printenv CONDA_PREFIX 2>/dev/null || true)"
 
-
     echo "PKG_CONFIG_PATH_VAR=$(printenv PKG_CONFIG_PATH 2>/dev/null || true)"
     echo "INCLUDE_VAR=$(printenv INCLUDE 2>/dev/null || true)"
     echo "C_INCLUDE_PATH_VAR=$(printenv C_INCLUDE_PATH 2>/dev/null || true)"
     echo "CPLUS_INCLUDE_PATH_VAR=$(printenv CPLUS_INCLUDE_PATH 2>/dev/null || true)"
-
-    echo "SLURM_NPROCS_VAR=$(printenv SLURM_NPROCS 2>/dev/null || true)"
 
     echo "__ENV_END__"
   BASH
@@ -95,7 +100,6 @@ pkg_config_path     = env["PKG_CONFIG_PATH_VAR"].to_s
 include_path        = env["INCLUDE_VAR"].to_s
 c_include_path      = env["C_INCLUDE_PATH_VAR"].to_s
 cplus_include_path  = env["CPLUS_INCLUDE_PATH_VAR"].to_s
-slurm_nprocs_raw = env["SLURM_NPROCS_VAR"].to_s
 
 
 # Fallbacks
@@ -210,19 +214,21 @@ File.write("#{staged_root}/rsession.conf", <<~CONF)
   session-save-action-default=no
 CONF
 
-slurm_nprocs =
-  if slurm_nprocs_raw.empty?
-    8
+
+omp_block =
+  if is_klc
+    <<~BASH
+      export OMP_NUM_THREADS=8
+      export MC_CORES=7
+    BASH
   else
-    slurm_nprocs_raw.to_i
+    <<~BASH
+      export OMP_NUM_THREADS=${SLURM_NPROCS:-8}
+      export MC_CORES=$((${SLURM_NPROCS:-8}-1))
+      [ "$MC_CORES" -lt 1 ] && export MC_CORES=1
+    BASH
   end
 
-slurm_nprocs = 8 if slurm_nprocs <= 0  # extra safety
-
-omp_num_threads = slurm_nprocs
-
-mc_cores = slurm_nprocs - 1
-mc_cores = 1 if mc_cores < 1
 
 # -----------------------------
 # rsession.sh
@@ -245,8 +251,7 @@ File.write("#{staged_root}/rsession.sh", <<~SH)
   export UDUNITS2_INCLUDE="/hpc/software/spack_v20d1/spack/opt/spack/linux-rhel7-x86_64/gcc-4.8.5/udunits-2.2.24-35mdgjfwirb2evo7clknfa7ipibxmji5/include"
   export UDUNITS2_LIBS="/hpc/software/spack_v20d1/spack/opt/spack/linux-rhel7-x86_64/gcc-4.8.5/udunits-2.2.24-35mdgjfwirb2evo7clknfa7ipibxmji5/lib"
 
-  export OMP_NUM_THREADS=#{omp_num_threads}
-  export MC_CORES=#{mc_cores}
+  #{omp_block.strip}
 
   PATH=#{path_env}:/usr/lib/rstudio-server/bin
 
